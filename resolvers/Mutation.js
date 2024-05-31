@@ -1,8 +1,8 @@
-const { authorizeWithGithub } = require("../lib")
+const { authorizeWithGithub } = require("../lib");
 
 module.exports = {
   Mutation: {
-    async postPhoto(parent, args, { db, currentUser }) {
+    async postPhoto(parent, args, { db, currentUser, pubsub }) {
       if (!currentUser) {
         throw new Error('only an authorized user can post a photo');
       }
@@ -15,6 +15,8 @@ module.exports = {
 
       const { insertedId } = await db.collection('photos').insertOne(newPhoto);
       newPhoto.id = insertedId;
+
+      pubsub.publish('photo-added', { newPhoto });
 
       return newPhoto;
     },
@@ -50,7 +52,7 @@ module.exports = {
 
       return { user: latestUserInfo, token: access_token };
     },
-    async addFakeUsers(parent, { count }, { db }) {
+    async addFakeUsers(parent, { count }, { db, pubsub }) {
       const randomUserApi = `https://randomuser.me/api?results=${count}`;
       const { results } = await fetch(randomUserApi).then(res => res.json());
 
@@ -61,7 +63,15 @@ module.exports = {
         githubToken: r.login.sha1
       }));
 
-      await db.collection('users').insertMany(users);
+      const insertionResult = await db.collection('users').insertMany(users);
+      users.forEach((user, index) => {
+        const insertedUser = {
+          ...user,
+          id: insertionResult.insertedIds[index],
+        };
+
+        pubsub.publish('user-created', { newUser: insertedUser });
+      });
 
       return users;
     },
