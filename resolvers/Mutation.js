@@ -1,4 +1,6 @@
-const { authorizeWithGithub } = require("../lib");
+const { authorizeWithGithub, uploadFile } = require('../lib');
+const path = require('path');
+const fs = require('fs');
 
 module.exports = {
   Mutation: {
@@ -15,6 +17,12 @@ module.exports = {
 
       const { insertedId } = await db.collection('photos').insertOne(newPhoto);
       newPhoto.id = insertedId;
+
+      const { file } = await args.input.file;
+      await uploadFile({
+        fileReadableStream: file.createReadStream(),
+        fileName: `${insertedId}.jpeg`,
+      });
 
       pubsub.publish('photo-added', { newPhoto });
 

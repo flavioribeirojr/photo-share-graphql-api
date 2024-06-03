@@ -1,18 +1,16 @@
-const { MongoClient } = require('mongodb');
+require('dotenv').config();
+const { createServer } = require('node:http');
+const fs = require('node:fs');
 const express = require('express');
 const cors = require('cors');
-const fs = require('fs');
-const { createServer } = require('http');
-const { ApolloServerPluginDrainHttpServer } = require('@apollo/server/plugin/drainHttpServer');
-const { ApolloServer } = require('@apollo/server');
-const { expressMiddleware } = require('@apollo/server/express4');
+const { createHandler } = require('graphql-http/lib/use/express');
 const { makeExecutableSchema } = require('@graphql-tools/schema');
+const { MongoClient } = require('mongodb');
 const { WebSocketServer } = require('ws');
-const { useServer } = require('graphql-ws/lib/use/ws');
-require('dotenv').config();
-const { resolvers } = require('./resolvers');
 const { PubSub } = require('graphql-subscriptions');
-const typeDefs = fs.readFileSync('./typeDefs.graphql', 'utf-8');
+const { useServer } = require('graphql-ws/lib/use/ws');
+const { resolvers } = require('./resolvers');
+const path = require('path');
 
 (async () => {
   const app = express();
@@ -20,20 +18,18 @@ const typeDefs = fs.readFileSync('./typeDefs.graphql', 'utf-8');
 
   const dbClient = await MongoClient.connect(process.env.DB_HOST);
   const db = dbClient.db();
-  const pubsub = new PubSub();
 
-  const schema = makeExecutableSchema({ typeDefs, resolvers });
+  const typeDefs = fs.readFileSync('./typeDefs.graphql', 'utf-8');
+  const schema = makeExecutableSchema({typeDefs, resolvers});
+
   const wsServer = new WebSocketServer({
-    // This is the `httpServer` we created in a previous step.
     server: httpServer,
-    // Pass a different path here if app.use
-    // serves expressMiddleware at a different path
     path: '/graphql',
   });
-  
-  // Hand in the schema we just created and have the
-  // WebSocketServer start listening.
-  const serverCleanup = useServer({
+
+  const pubsub = new PubSub();
+
+  useServer({
     schema,
     onConnect: async context => {
       const githubToken = context.connectionParams.Authorization;
@@ -51,32 +47,42 @@ const typeDefs = fs.readFileSync('./typeDefs.graphql', 'utf-8');
     wsServer
   );
 
-  const server = new ApolloServer({
-    schema,
+  app.all(
+    '/graphql',
+    express.json(),
+    cors(),
+    createHandler({
+      schema,
+      async parseRequestParams(req) {
+        if (req.headers['content-type'] === 'application/json') {
+          return req.body.query;
+        }
 
-    plugins: [
-      ApolloServerPluginDrainHttpServer({ httpServer }),
-      {
-        async serverWillStart() {
-          return {
-            async drainServer() {
-              await serverCleanup.dispose();
-            },
-          };
-        },
+        const processRequest = await import('graphql-upload/processRequest.mjs');
+        const params = await processRequest.default(req.raw, req.context.res);
+
+        if (Array.isArray(params)) {
+          throw new Error('Batching is not supported');
+        }
+
+        return {
+          ...params,
+          variables: Object(params.variables),
+        };
       },
-    ]
-  });
-  await server.start();
+      context: async (req) => {
+        const githubToken = req.headers.authorization;
+        const currentUser = await db.collection('users').findOne({ githubToken });
 
-  app.use('/graphql', cors(), express.json(), expressMiddleware(server, {
-    context: async ({ req }) => {
-      const githubToken = req.headers.authorization;
-      const currentUser = await db.collection('users').findOne({ githubToken });
+        return { db, currentUser, pubsub };
+      }
+    })
+  );
 
-      return { db, currentUser, pubsub };
-    }
-  }));
+  app.use(
+    '/img/photos',
+    express.static(path.join(__dirname, 'assets', 'photos'))
+  );
 
   httpServer.listen(4000, () => {
     console.log(`GraphQL Server running @ http://localhost:4000/graphql`);
